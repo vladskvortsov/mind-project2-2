@@ -1,0 +1,175 @@
+name: Deploy images to ECR
+on: 
+  workflow_dispatch:
+  # push:
+  #   branches:
+  #     - main
+  #   paths:
+  #     - 'backend_redis/*'
+  #     - 'backend_rds/*'
+jobs:
+  create-rds-backend-ecr-repository:
+   runs-on: ubuntu-latest
+   steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Create rds-backend Repository
+      run: |
+        REPO_NAME="project2-2-rds-backend"
+        
+        # Check if the repository already exists
+        EXISTING_REPO=$(aws ecr describe-repositories --repository-names $REPO_NAME --query "repositories[0].repositoryName" --output text 2>/dev/null || echo "None")
+        
+        if [ "$EXISTING_REPO" == "None" ]; then
+          echo "ECR repository does not exist. Creating repository..."
+          aws ecr create-repository --repository-name $REPO_NAME
+          echo "ECR repository created: $REPO_NAME"
+        else
+          echo "Using existing ECR repository: $EXISTING_REPO"
+        fi
+
+  create-redis-backend-ecr-repository:
+   runs-on: ubuntu-latest
+   steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Create redis-backend Repository
+      run: |
+        REPO_NAME="project2-2-redis-backend"
+        
+        # Check if the repository already exists
+        EXISTING_REPO=$(aws ecr describe-repositories --repository-names $REPO_NAME --query "repositories[0].repositoryName" --output text 2>/dev/null || echo "None")
+        
+        if [ "$EXISTING_REPO" == "None" ]; then
+          echo "ECR repository does not exist. Creating repository..."
+          aws ecr create-repository --repository-name $REPO_NAME
+          echo "ECR repository created: $REPO_NAME"
+        else
+          echo "Using existing ECR repository: $EXISTING_REPO"
+        fi
+
+
+  deploy-rds-backend-to-ecr:
+    runs-on: ubuntu-latest
+    needs: create-rds-backend-ecr-repository
+    steps:
+      - name: Checkout 
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          
+      - name: Build image
+        id: ecr-publish
+        uses: bitovi/github-actions-ecr-publish@v0.1.0
+        with:
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_default_region: ${{ secrets.AWS_REGION }}
+          aws_ecr_repo_name: project2-2-rds-backend
+          # image_tag: ${{ github.sha }}
+          use_sha: 'true' # won't do anything since image_tag is set
+          working_directory: ./backend_rds/
+
+      - name: Get Image Manifest and Create Additional Tag
+        id: get-manifest
+        run: |
+           IMAGE_MANIFEST=$(aws ecr batch-get-image \
+             --repository-name project2-2-rds-backend \
+             --image-ids imageTag=${{ github.sha }} \
+             --query 'images[0].imageManifest' \
+             --output text)
+
+           aws ecr put-image \
+             --repository-name project2-2-rds-backend \
+             --image-tag latest \
+             --image-manifest "$IMAGE_MANIFEST"
+
+
+  deploy-redis-backend-to-ecr:
+    runs-on: ubuntu-latest
+    needs: create-redis-backend-ecr-repository
+    steps:
+      - name: Checkout 
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Build image
+        id: ecr-publish
+        uses: bitovi/github-actions-ecr-publish@v0.1.0
+        with:
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_default_region: ${{ secrets.AWS_REGION }}
+          aws_ecr_repo_name: project2-2-redis-backend
+          # image_tag: ${{ github.sha }}
+          use_sha: 'true' # won't do anything since image_tag is set
+          working_directory: ./backend_redis/
+
+      - name: Get Image Manifest and Create Additional Tag
+        id: get-manifest
+        run: |
+           IMAGE_MANIFEST=$(aws ecr batch-get-image \
+             --repository-name project2-2-redis-backend \
+             --image-ids imageTag=${{ github.sha }} \
+             --query 'images[0].imageManifest' \
+             --output text)
+
+           aws ecr put-image \
+             --repository-name project2-2-redis-backend \
+             --image-tag latest \
+             --image-manifest "$IMAGE_MANIFEST"
+
+  update-rds-backend-service-in-ecs:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    needs: deploy-rds-backend-to-ecr
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update Service
+        run: |
+          aws ecs update-service --cluster project2-2-cluster --service backend-rds --force-new-deployment
+
+  update-redis-backend-service-in-ecs:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    needs: deploy-redis-backend-to-ecr
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update Service
+        run: |
+          aws ecs update-service --cluster project2-2-cluster --service backend-redis --force-new-deployment
